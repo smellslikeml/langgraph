@@ -2,6 +2,11 @@
 
 from langgraph.prebuilt._tool_call_transformer import ToolCallTransformer
 from langgraph.prebuilt.chat_agent_executor import create_react_agent
+from langgraph.prebuilt.tool_frontier import (
+    CausalToolFilter,
+    ToolContract,
+    ToolFilter,
+)
 from langgraph.prebuilt.tool_node import (
     InjectedState,
     InjectedStore,
@@ -13,6 +18,9 @@ from langgraph.prebuilt.tool_validator import ValidationNode
 
 __all__ = [
     "create_react_agent",
+    "CausalToolFilter",
+    "ToolContract",
+    "ToolFilter",
     "ToolNode",
     "ToolCallTransformer",
     "tools_condition",

@@ -104,6 +104,26 @@ validation_node.invoke({
 })
 ```
 
+### Tool filtering
+
+Larger tool menus can reduce agent reliability and inflate token cost. `create_react_agent` accepts an optional `tool_filter` that selects which tools to expose to the model at each step, given the current state. `CausalToolFilter` implements *causal minimal tool filtering* — adapted from [ToolChoiceConfusion: Causal Minimal Tool Filtering for Reliable LLM Agents](https://arxiv.org/abs/2606.06284) — exposing only the minimal next-step tool frontier described by lightweight precondition-effect contracts:
+
+```python
+from langgraph.prebuilt import CausalToolFilter, ToolContract, create_react_agent
+
+tool_filter = CausalToolFilter(
+    {
+        "search": ToolContract(provides={"results"}),
+        "open_doc": ToolContract(requires={"results"}, provides={"page"}),
+        "summarize": ToolContract(requires={"page"}, provides={"summary"}),
+    }
+)
+
+# Before any tool runs only `search` is bound; after a successful `search`,
+# `open_doc` becomes available, and so on.
+app = create_react_agent(model, tools, tool_filter=tool_filter)
+```
+
 ## Agent Inbox
 
 The library contains schemas for using the [Agent Inbox](https://github.com/langchain-ai/agent-inbox) with LangGraph agents. Learn more about how to use Agent Inbox [here](https://github.com/langchain-ai/agent-inbox#interrupts).
