@@ -44,6 +44,7 @@ from langgraph.warnings import LangGraphDeprecatedSinceV10
 from pydantic import BaseModel
 from typing_extensions import NotRequired, TypedDict, deprecated
 
+from langgraph.prebuilt.tool_frontier import ToolFilter
 from langgraph.prebuilt.tool_node import ToolCallWithContext, ToolNode
 
 StructuredResponse = dict | BaseModel
@@ -295,6 +296,7 @@ def create_react_agent(
     | None = None,
     pre_model_hook: RunnableLike | None = None,
     post_model_hook: RunnableLike | None = None,
+    tool_filter: ToolFilter | None = None,
     state_schema: StateSchemaType | None = None,
     context_schema: type[Any] | None = None,
     checkpointer: Checkpointer | None = None,
@@ -428,6 +430,13 @@ def create_react_agent(
 
             !!! Note
                 Only available with `version="v2"`.
+        tool_filter: An optional callable `(tools, state) -> tools` that selects
+            which tools to expose to the model at each step, given the current
+            graph state. Use this to bind only the minimal next-step tool
+            frontier instead of the full tool menu, reducing wrong-tool calls
+            and token cost. See [`CausalToolFilter`][langgraph.prebuilt.tool_frontier.CausalToolFilter]
+            for a contract-based implementation. Only supported with a static
+            model (a dynamic model callable controls its own tool binding).
         state_schema: An optional state schema that defines graph state.
             Must have `messages` and `remaining_steps` keys.
             Defaults to `AgentState` that defines those two keys.
@@ -579,8 +588,14 @@ def create_react_agent(
 
             model = cast(BaseChatModel, init_chat_model(model))
 
+        # Keep the unbound base model so a `tool_filter` can re-bind a
+        # per-step subset of tools (the causal minimal frontier) at runtime.
+        static_base_model: BaseChatModel | None = cast(BaseChatModel, model)
         if (
-            _should_bind_tools(model, tool_classes, num_builtin=len(llm_builtin_tools))  # type: ignore[arg-type]
+            tool_filter is None
+            and _should_bind_tools(
+                model, tool_classes, num_builtin=len(llm_builtin_tools)
+            )  # type: ignore[arg-type]
             and len(tool_classes + llm_builtin_tools) > 0
         ):
             model = cast(BaseChatModel, model).bind_tools(
@@ -590,11 +605,28 @@ def create_react_agent(
         static_model: Runnable | None = _get_prompt_runnable(prompt) | model  # type: ignore[operator]
     else:
         # For dynamic models, we'll create the runnable at runtime
+        static_base_model = None
         static_model = None
+
+    if tool_filter is not None and is_dynamic_model:
+        raise ValueError(
+            "`tool_filter` is only supported with a static model; a dynamic "
+            "model callable controls its own tool binding."
+        )
 
     # If any of the tools are configured to return_directly after running,
     # our graph needs to check if these were called
     should_return_direct = {t.name for t in tool_classes if t.return_direct}
+
+    def _frontier_model(state: StateSchema) -> Runnable:
+        """Bind only the causal minimal tool frontier for the current state."""
+        selected = {t.name for t in tool_filter(tool_classes, state)}  # type: ignore[misc]
+        bound_tools = [
+            t for t in tool_classes if t.name in selected
+        ] + llm_builtin_tools
+        base = cast(BaseChatModel, static_base_model)
+        model_with_tools = base.bind_tools(bound_tools) if bound_tools else base
+        return _get_prompt_runnable(prompt) | model_with_tools
 
     def _resolve_model(
         state: StateSchema, runtime: Runtime[ContextT]
@@ -602,6 +634,8 @@ def create_react_agent(
         """Resolve the model to use, handling both static and dynamic models."""
         if is_dynamic_model:
             return _get_prompt_runnable(prompt) | model(state, runtime)  # type: ignore[operator]
+        elif tool_filter is not None:
+            return _frontier_model(state)
         else:
             return static_model
 
@@ -614,6 +648,8 @@ def create_react_agent(
             return _get_prompt_runnable(prompt) | resolved_model
         elif is_dynamic_model:
             return _get_prompt_runnable(prompt) | model(state, runtime)  # type: ignore[operator]
+        elif tool_filter is not None:
+            return _frontier_model(state)
         else:
             return static_model
 
@@ -671,8 +707,9 @@ def create_react_agent(
 
         model_input = _get_model_input_state(state)
 
-        if is_dynamic_model:
-            # Resolve dynamic model at runtime and apply prompt
+        if is_dynamic_model or tool_filter is not None:
+            # Resolve the model at runtime (dynamic model, or static model with
+            # a per-step tool frontier) and apply the prompt.
             dynamic_model = _resolve_model(state, runtime)
             response = cast(AIMessage, dynamic_model.invoke(model_input, config))  # type: ignore[arg-type]
         else:
@@ -698,9 +735,9 @@ def create_react_agent(
     ) -> StateSchema:
         model_input = _get_model_input_state(state)
 
-        if is_dynamic_model:
-            # Resolve dynamic model at runtime and apply prompt
-            # (supports both sync and async)
+        if is_dynamic_model or tool_filter is not None:
+            # Resolve the model at runtime (dynamic model, or static model with
+            # a per-step tool frontier) and apply the prompt.
             dynamic_model = await _aresolve_model(state, runtime)
             response = cast(AIMessage, await dynamic_model.ainvoke(model_input, config))  # type: ignore[arg-type]
         else:
